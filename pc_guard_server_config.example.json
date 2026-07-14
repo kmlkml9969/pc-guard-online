@@ -1,0 +1,24 @@
+{
+  "bind_host": "0.0.0.0",
+  "bind_port": 8787,
+  "timezone": "Asia/Shanghai",
+  "shared_token": "CHANGE_ME_LONG_RANDOM_TOKEN",
+  "stale_after_seconds": 120,
+  "reminder": {
+    "enabled": true,
+    "weekdays_only": true,
+    "time": "18:30"
+  },
+  "notifications": {
+    "ntfy_url": "",
+    "bark_url": "",
+    "wecom_webhook": ""
+  },
+  "personal_wechat_bot": {
+    "enabled": false,
+    "inbound_token": "CHANGE_ME_WECHAT_INBOUND_TOKEN",
+    "send_url": "",
+    "send_token": "",
+    "default_to": ""
+  }
+}
