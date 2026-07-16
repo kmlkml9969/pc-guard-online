@@ -1,0 +1,7 @@
+{
+  "server_url": "https://你的公网域名或服务器地址",
+  "shared_token": "请和服务端 shared_token 保持一致",
+  "pc_name": "office-pc",
+  "heartbeat_interval_seconds": 8,
+  "enable_win_l_hook": true
+}

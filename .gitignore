@@ -1,0 +1,7 @@
+﻿*.log
+*.err.log
+*.png
+pc_guard_config.json
+pc_guard_agent_config.json
+__pycache__/
+.openclaw/
