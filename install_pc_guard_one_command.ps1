@@ -262,7 +262,7 @@ Write-Output ""
 Write-Output "PC Guard installed."
 Write-Output "InstallDir: $InstallDir"
 if ($WithWeixin) {
-  Write-Output "WeChat commands: status, security, network, risk, lock, help (Chinese aliases enabled)."
+  Write-Output "WeChat commands: status, security, network, risk, protect, lock, help (Chinese aliases enabled)."
 } else {
   Write-Output "Run again with -WithWeixin to connect the personal WeChat ClawBot plugin."
 }

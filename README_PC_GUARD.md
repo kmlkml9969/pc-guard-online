@@ -20,6 +20,7 @@ Runtime data is stored in `%LOCALAPPDATA%\PCGuard`. The security monitor creates
 /secevents      recent security events
 /secports       non-loopback listening ports
 /secnet         WiFi, gateway, DNS, proxy, and network category
+/protect        harden PC-side network exposure
 /pchelp         command help
 ```
 
@@ -36,7 +37,9 @@ The first release alerts on:
 - WiFi network category leaving Public;
 - gateway IP/MAC, DNS, or system proxy changes.
 
-Alerts are queued locally until Weixin delivery succeeds. This release does not automatically delete files, terminate processes, or disconnect the network.
+Alerts are queued locally until Weixin delivery succeeds.
+
+The `protect` command can enable Windows Firewall, set active non-domain networks to Public, disable Windows Remote Desktop, stop/disable Remote Registry and WinRM, and turn off common discovery/sharing firewall entry points when permissions allow it. It does not delete files, terminate arbitrary processes, change DNS, change VPN/proxy settings, or disconnect the network.
 
 ## Limits
 

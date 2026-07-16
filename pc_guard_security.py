@@ -202,6 +202,104 @@ $result | ConvertTo-Json -Depth 8 -Compress
 """
 
 
+POWERSHELL_PROTECT = r"""
+$ErrorActionPreference = 'Continue'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+$result = [ordered]@{
+  applied = @()
+  skipped = @()
+  failed = @()
+  is_admin = [bool]$isAdmin
+  finished_at = (Get-Date).ToUniversalTime().ToString('o')
+}
+
+function Add-Applied([string]$code, [string]$detail) {
+  $result.applied += [ordered]@{ code = $code; detail = $detail }
+}
+
+function Add-Skipped([string]$code, [string]$detail) {
+  $result.skipped += [ordered]@{ code = $code; detail = $detail }
+}
+
+function Add-Failed([string]$code, [string]$detail, [object]$errorRecord) {
+  $result.failed += [ordered]@{ code = $code; detail = $detail; error = [string]$errorRecord.Exception.Message }
+}
+
+function Invoke-Step([string]$code, [string]$detail, [scriptblock]$action) {
+  try {
+    & $action
+    Add-Applied $code $detail
+  } catch {
+    Add-Failed $code $detail $_
+  }
+}
+
+Invoke-Step 'firewall_enabled' 'Enabled Windows Firewall for all profiles' {
+  Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop
+}
+
+try {
+  $profiles = @(Get-NetConnectionProfile -ErrorAction Stop)
+  $changed = 0
+  foreach ($profile in $profiles) {
+    if ([string]$profile.NetworkCategory -eq 'DomainAuthenticated') {
+      Add-Skipped 'network_public' ('Domain network left unchanged: ' + [string]$profile.Name)
+      continue
+    }
+    if ([string]$profile.NetworkCategory -ne 'Public') {
+      Set-NetConnectionProfile -InterfaceIndex $profile.InterfaceIndex -NetworkCategory Public -ErrorAction Stop
+      $changed += 1
+    }
+  }
+  if ($changed -gt 0) {
+    Add-Applied 'network_public' ('Set active network profile(s) to Public: ' + $changed)
+  } else {
+    Add-Skipped 'network_public' 'Active network profile is already Public'
+  }
+} catch {
+  Add-Failed 'network_public' 'Set active network profile to Public' $_
+}
+
+Invoke-Step 'rdp_disabled' 'Disabled Windows Remote Desktop' {
+  Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 1 -ErrorAction Stop
+  try { Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Out-Null } catch {}
+  try { & netsh.exe advfirewall firewall set rule group='remote desktop' new enable=No | Out-Null } catch {}
+}
+
+Invoke-Step 'remote_registry_disabled' 'Stopped and disabled Remote Registry service' {
+  Stop-Service -Name RemoteRegistry -Force -ErrorAction SilentlyContinue
+  Set-Service -Name RemoteRegistry -StartupType Disabled -ErrorAction Stop
+}
+
+Invoke-Step 'winrm_disabled' 'Stopped and disabled WinRM remote management service' {
+  Stop-Service -Name WinRM -Force -ErrorAction SilentlyContinue
+  Set-Service -Name WinRM -StartupType Disabled -ErrorAction Stop
+}
+
+try {
+  & netsh.exe advfirewall firewall set rule group='network discovery' new enable=No | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "netsh exited with code $LASTEXITCODE" }
+  Add-Applied 'network_discovery_disabled' 'Disabled Network Discovery firewall rules'
+} catch {
+  Add-Failed 'network_discovery_disabled' 'Disable Network Discovery firewall rules' $_
+}
+
+try {
+  & netsh.exe advfirewall firewall set rule group='file and printer sharing' new enable=No | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "netsh exited with code $LASTEXITCODE" }
+  Add-Applied 'file_sharing_firewall_disabled' 'Disabled File and Printer Sharing firewall rules'
+} catch {
+  Add-Failed 'file_sharing_firewall_disabled' 'Disable File and Printer Sharing firewall rules' $_
+}
+
+$result | ConvertTo-Json -Depth 8 -Compress
+"""
+
+
 def _utc_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -306,6 +404,69 @@ def collect_security_snapshot(timeout: int = 35) -> dict[str, Any]:
             )
     except Exception as exc:
         return _normalize_snapshot({"errors": [{"section": "collector", "message": str(exc)}]})
+
+
+def apply_network_protection(timeout: int = 45) -> dict[str, Any]:
+    """Apply defensive Windows network hardening and return a structured report."""
+    if os.name != "nt":
+        return {
+            "ok": False,
+            "applied": [],
+            "skipped": [],
+            "failed": [{"code": "platform", "detail": "Windows is required", "error": "not_windows"}],
+            "is_admin": False,
+            "finished_at": _utc_now(),
+        }
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
+            input=POWERSHELL_PROTECT.encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(10, int(timeout)),
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        output = _decode_output(completed.stdout).strip()
+        if not output:
+            message = _decode_output(completed.stderr).strip() or f"PowerShell exited with {completed.returncode}"
+            return {
+                "ok": False,
+                "applied": [],
+                "skipped": [],
+                "failed": [{"code": "powershell", "detail": "Run protection script", "error": message}],
+                "is_admin": False,
+                "finished_at": _utc_now(),
+            }
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError as exc:
+            return {
+                "ok": False,
+                "applied": [],
+                "skipped": [],
+                "failed": [{"code": "powershell_json", "detail": "Parse protection result", "error": f"{exc}: {output[-500:]}"}],
+                "is_admin": False,
+                "finished_at": _utc_now(),
+            }
+        if not isinstance(result, dict):
+            result = {}
+        result["applied"] = _as_list(result.get("applied"))
+        result["skipped"] = _as_list(result.get("skipped"))
+        result["failed"] = _as_list(result.get("failed"))
+        result["ok"] = not bool(result["failed"])
+        result.setdefault("finished_at", _utc_now())
+        result["is_admin"] = bool(result.get("is_admin"))
+        return result
+    except Exception as exc:
+        return {
+            "ok": False,
+            "applied": [],
+            "skipped": [],
+            "failed": [{"code": "collector", "detail": "Run protection script", "error": str(exc)}],
+            "is_admin": False,
+            "finished_at": _utc_now(),
+        }
 
 
 def _items_by_key(items: Iterable[Any], keys: tuple[str, ...]) -> dict[str, dict[str, Any]]:
@@ -1036,9 +1197,92 @@ def format_security_network(value: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _protection_step_text(code: str) -> str:
+    mapping = {
+        "firewall_enabled": "\u5f00\u542f Windows \u9632\u706b\u5899",
+        "network_public": "\u8bbe\u4e3a\u516c\u7528\u7f51\u7edc\u6a21\u5f0f",
+        "rdp_disabled": "\u5173\u95ed Windows \u8fdc\u7a0b\u684c\u9762",
+        "remote_registry_disabled": "\u5173\u95ed\u8fdc\u7a0b\u6ce8\u518c\u8868\u670d\u52a1",
+        "winrm_disabled": "\u5173\u95ed WinRM \u8fdc\u7a0b\u7ba1\u7406",
+        "network_discovery_disabled": "\u5173\u95ed\u7f51\u7edc\u53d1\u73b0\u5165\u53e3",
+        "file_sharing_firewall_disabled": "\u5173\u95ed\u6587\u4ef6\u548c\u6253\u5370\u673a\u5171\u4eab\u5165\u53e3",
+        "platform": "\u68c0\u67e5\u7cfb\u7edf\u5e73\u53f0",
+        "powershell": "\u6267\u884c\u9632\u62a4\u811a\u672c",
+        "powershell_json": "\u89e3\u6790\u9632\u62a4\u7ed3\u679c",
+        "collector": "\u6267\u884c\u9632\u62a4\u547d\u4ee4",
+    }
+    return mapping.get(code, code or "\u672a\u77e5\u9879\u76ee")
+
+
+def _protection_items(items: Iterable[Any], limit: int = 8) -> list[str]:
+    lines: list[str] = []
+    for item in list(items)[: max(0, int(limit))]:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "")
+            lines.append(f"- {_protection_step_text(code)}")
+        else:
+            lines.append(f"- {item}")
+    return lines
+
+
+def format_network_protection(value: dict[str, Any] | None, status: dict[str, Any] | None = None) -> str:
+    result = value if isinstance(value, dict) else {}
+    applied = [item for item in _as_list(result.get("applied")) if item]
+    skipped = [item for item in _as_list(result.get("skipped")) if item]
+    failed = [item for item in _as_list(result.get("failed")) if item]
+    is_admin = bool(result.get("is_admin"))
+    snapshot = _snapshot_from(status)
+    ssid, wifi_security, wifi_level = _wifi_security_info(snapshot)
+    profiles = [item for item in snapshot.get("network_profiles", []) if isinstance(item, dict)]
+    public = any(str(item.get("category", "")).lower() == "public" for item in profiles)
+    firewalls = [item for item in snapshot.get("firewall", []) if isinstance(item, dict)]
+    firewall_ok = bool(firewalls) and all(bool(item.get("enabled")) for item in firewalls)
+
+    if failed and not applied:
+        conclusion = "\u672a\u80fd\u5b8c\u6210\u81ea\u52a8\u9632\u62a4"
+    elif failed:
+        conclusion = "\u5df2\u5b8c\u6210\u90e8\u5206\u9632\u62a4"
+    else:
+        conclusion = "\u7535\u8111\u4fa7\u9632\u62a4\u5df2\u52a0\u56fa"
+
+    lines = ["\u3010\u4e00\u952e\u9632\u62a4\u3011", f"\u7ed3\u8bba\uff1a{conclusion}", ""]
+    lines.append(f"\u5f53\u524d WiFi\uff1a{ssid}")
+    lines.append(f"WiFi \u52a0\u5bc6\uff1a{wifi_security}")
+    lines.append(f"\u516c\u7528\u7f51\u7edc\uff1a{'\u5df2\u5f00\u542f' if public else '\u672a\u786e\u8ba4'}")
+    lines.append(f"\u9632\u706b\u5899\uff1a{'\u5df2\u5f00\u542f' if firewall_ok else '\u672a\u786e\u8ba4'}")
+
+    if applied:
+        lines.extend(["", "\u5df2\u5904\u7406\uff1a"] + _protection_items(applied))
+    if skipped:
+        lines.extend(["", "\u5df2\u662f\u5b89\u5168\u72b6\u6001\uff1a"] + _protection_items(skipped, limit=4))
+    if failed:
+        lines.append("")
+        lines.append("\u672a\u5b8c\u6210\uff1a")
+        for item in failed[:5]:
+            if isinstance(item, dict):
+                code = str(item.get("code") or "")
+                error = str(item.get("error") or "")
+                hint = "\u53ef\u80fd\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650" if not is_admin else (error[:80] or "\u6267\u884c\u5931\u8d25")
+                lines.append(f"- {_protection_step_text(code)}：{hint}")
+
+    lines.extend(
+        [
+            "",
+            "\u8def\u7531\u5668\u5c42\u8bf4\u660e\uff1a",
+            "\u8fd9\u80fd\u964d\u4f4e\u540c WiFi \u8bbe\u5907\u8fde\u5230\u4f60\u7535\u8111\u7684\u6982\u7387\uff0c\u4f46\u4e0d\u80fd\u963b\u6b62\u8def\u7531\u5668\u6216 WiFi \u7ba1\u7406\u8005\u8bb0\u5f55\u8fde\u63a5\u5143\u6570\u636e\u3002",
+            "\u771f\u8981\u7ed5\u5f00\u8def\u7531\u5668\u89c6\u89d2\uff1a\u7528\u624b\u673a\u70ed\u70b9/\u624b\u673a\u6d41\u91cf\uff1b\u6216\u7528\u53ef\u4fe1 VPN\u3002",
+        ]
+    )
+    if wifi_level in {"high", "warning", "unknown"}:
+        lines.append("\u5efa\u8bae\uff1a\u5f53\u524d WiFi \u52a0\u5bc6\u4fe1\u606f\u4e0d\u591f\u7406\u60f3\uff0c\u5904\u7406\u654f\u611f\u5185\u5bb9\u65f6\u4f18\u5148\u7528\u624b\u673a\u6d41\u91cf\u3002")
+    return "\n".join(lines)
+
+
 __all__ = [
     "SecurityMonitor",
+    "apply_network_protection",
     "collect_security_snapshot",
+    "format_network_protection",
     "format_security_status",
     "format_security_events",
     "format_security_ports",

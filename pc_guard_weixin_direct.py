@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pc_guard_security import (
     SecurityMonitor,
+    apply_network_protection,
+    format_network_protection,
     format_security_events,
     format_security_network,
     format_security_ports,
@@ -313,6 +315,10 @@ def handle_command(text: str, pc_config_path: Path, security: SecurityMonitor) -
         return format_security_ports(security.run_scan())
     if trimmed in {"\u7f51\u7edc\u5b89\u5168", "\u7f51\u7edc"} or lower in {"/secnet", "/network"}:
         return format_security_network(security.run_scan())
+    if trimmed in {"\u9632\u62a4", "\u9694\u79bb", "\u52a0\u56fa"} or lower in {"/protect", "/harden"}:
+        protection = apply_network_protection()
+        scan = security.run_scan()
+        return format_network_protection(protection, status=scan)
     if trimmed == "\u5e2e\u52a9" or lower in {"/pchelp", "help"}:
         return (
             "\u5e38\u7528\u64cd\u4f5c\uff1a\n"
@@ -320,6 +326,7 @@ def handle_command(text: str, pc_config_path: Path, security: SecurityMonitor) -
             "\u5b89\u5168 - \u67e5\u770b\u7535\u8111\u662f\u5426\u6709\u98ce\u9669\n"
             "\u7f51\u7edc - \u67e5\u770b\u5f53\u524d WiFi \u662f\u5426\u5b89\u5168\n"
             "\u98ce\u9669 - \u67e5\u770b\u6700\u8fd1\u53d1\u73b0\u7684\u95ee\u9898\n"
+            "\u9632\u62a4 - \u52a0\u56fa\u7535\u8111\u4fa7\u7f51\u7edc\u66b4\u9732\n"
             "\u9501\u5c4f - \u7acb\u5373\u9501\u5b9a\u7535\u8111\n\n"
             "\u5e73\u65f6\u53ea\u9700\u8981\u53d1\u9001\u201c\u72b6\u6001\u201d\u6216\u201c\u5b89\u5168\u201d\u3002"
         )
