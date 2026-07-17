@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $BaseUrl = $env:PC_GUARD_BASE_URL
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-  $BaseUrl = "https://raw.githubusercontent.com/kmlkml9969/pc-guard-online/pcguard-20260717-1"
+  $BaseUrl = "https://raw.githubusercontent.com/kmlkml9969/pc-guard-online/pcguard-20260717-2"
 }
 
 $WithWeixin = $true

@@ -118,6 +118,37 @@ function Test-PCGuardApi {
   }
 }
 
+function Get-LatestWeixinAccount {
+  param(
+    [string]$OpenClawDir,
+    [datetime]$NotBefore = [datetime]::MinValue
+  )
+
+  $accountsDir = Join-Path $OpenClawDir "openclaw-weixin\accounts"
+  if (-not (Test-Path -LiteralPath $accountsDir)) {
+    return $null
+  }
+
+  $files = @(Get-ChildItem -LiteralPath $accountsDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -ge $NotBefore } |
+    Sort-Object LastWriteTime -Descending)
+  foreach ($file in $files) {
+    try {
+      $data = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+      if ([bool]$data.token -and [bool]$data.userId) {
+        return [pscustomobject]@{
+          Account = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+          File = $file.FullName
+          Data = $data
+        }
+      }
+    } catch {
+      Write-Output "Skipping invalid Weixin account file: $($file.FullName)"
+    }
+  }
+  return $null
+}
+
 Require-Command python "Install Python 3.11+ first, or add it to PATH."
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -214,36 +245,35 @@ Stop-PCGuardCore
 Start-Process -FilePath "python" -ArgumentList @("`"$InstallDir\pc_guard_agent.py`"", "--config", "`"$agentConfigPath`"") -WorkingDirectory $InstallDir -WindowStyle Hidden
 
 if ($WithWeixin) {
-  $accountsPath = Join-Path $env:USERPROFILE ".openclaw\openclaw-weixin\accounts.json"
-  $accounts = @()
-  if (Test-Path -LiteralPath $accountsPath) {
-    $accounts = @(Get-Content -LiteralPath $accountsPath -Raw | ConvertFrom-Json)
-  }
+  $openclawDir = Join-Path $env:USERPROFILE ".openclaw"
   $reuseExisting = $false
-  if ($accounts.Count -gt 0) {
-    $candidate = $accounts[-1]
-    $candidateFile = Join-Path $env:USERPROFILE ".openclaw\openclaw-weixin\accounts\$candidate.json"
-    if (Test-Path -LiteralPath $candidateFile) {
-      $candidateData = Get-Content -LiteralPath $candidateFile -Raw | ConvertFrom-Json
-      $reuseExisting = [bool]$candidateData.token -and [bool]$candidateData.userId
-    }
+  $selectedAccount = Get-LatestWeixinAccount -OpenClawDir $openclawDir
+  if ($selectedAccount) {
+    $reuseExisting = $true
   }
 
   if (-not $reuseExisting) {
+    $scanStartedAt = (Get-Date).AddMinutes(-2)
     $qrResponse = Invoke-RestMethod -Uri "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3" -Method Get -TimeoutSec 30
     Write-Output ""
     Write-Output "Scan this Weixin ClawBot authorization link with WeChat:"
     Write-Output $qrResponse.qrcode_img_content
     Start-Process $qrResponse.qrcode_img_content
     python (Join-Path $InstallDir "weixin_qr_poll_save.py") --qrcode $qrResponse.qrcode --timeout-seconds 480
-    $accounts = @(Get-Content -LiteralPath $accountsPath -Raw | ConvertFrom-Json)
+    if ($LASTEXITCODE -ne 0) {
+      throw "Weixin QR authorization failed. Please rerun the install command and scan the QR code again."
+    }
+    $selectedAccount = Get-LatestWeixinAccount -OpenClawDir $openclawDir -NotBefore $scanStartedAt
   } else {
     Write-Output "Reusing the existing Weixin ClawBot authorization."
   }
 
-  $account = @($accounts)[-1]
-  $accountFile = Join-Path $env:USERPROFILE ".openclaw\openclaw-weixin\accounts\$account.json"
-  $accountData = Get-Content -LiteralPath $accountFile -Raw | ConvertFrom-Json
+  if (-not $selectedAccount) {
+    throw "No valid Weixin ClawBot account was found after authorization. Please rerun the install command and scan again."
+  }
+
+  $account = [string]$selectedAccount.Account
+  $accountData = $selectedAccount.Data
 
   $serverConfig = Get-Content -LiteralPath $serverConfigPath -Raw | ConvertFrom-Json
   $serverConfig.openclaw_weixin.enabled = $true

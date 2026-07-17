@@ -1,6 +1,7 @@
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -73,7 +74,12 @@ def main() -> None:
 
     while time.time() < deadline:
         url = f"{BASE_URL}/ilink/bot/get_qrcode_status?qrcode={urllib.parse.quote(qrcode)}"
-        status = get_json(url)
+        try:
+            status = get_json(url)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            print(f"POLL_ERROR {type(exc).__name__}: {exc}", flush=True)
+            time.sleep(2)
+            continue
         print(json.dumps(status, ensure_ascii=False), flush=True)
         state = status.get("status")
         if state == "confirmed":
