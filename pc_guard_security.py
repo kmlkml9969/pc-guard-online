@@ -520,6 +520,21 @@ def _proxy_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_local_proxy_identity(proxy: dict[str, Any]) -> bool:
+    target = str(proxy.get("server") or proxy.get("auto_config_url") or "").lower().strip()
+    return target.startswith(("127.", "localhost", "http://127.", "https://127.", "socks=127."))
+
+
+def _is_empty_proxy_identity(proxy: dict[str, Any]) -> bool:
+    return (
+        not bool(proxy.get("enabled"))
+        and not str(proxy.get("server") or "").strip()
+        and not str(proxy.get("auto_config_url") or "").strip()
+        and not bool(proxy.get("auto_detect"))
+        and not str(proxy.get("winhttp") or "").strip()
+    )
+
+
 def _failed_sections(snapshot: dict[str, Any]) -> set[str]:
     failed = set()
     for item in snapshot.get("errors", []):
@@ -577,22 +592,31 @@ def _find_baseline_differences(baseline: dict[str, Any], current: dict[str, Any]
         old_gateway = _gateway_identity(baseline)
         new_gateway = _gateway_identity(current)
         if old_gateway != new_gateway:
-            subject = {"baseline": old_gateway, "current": new_gateway}
-            findings.append(_finding("gateway_changed", "high", "网关 IP 或 MAC 已变化", "默认网关身份与首次基线不同。", subject))
+            if old_gateway and not new_gateway:
+                pass
+            else:
+                subject = {"baseline": old_gateway, "current": new_gateway}
+                findings.append(_finding("gateway_changed", "high", "网关 IP 或 MAC 已变化", "默认网关身份与首次基线不同。", subject))
 
     if "dns" not in failed:
         old_dns = _dns_identity(baseline)
         new_dns = _dns_identity(current)
         if old_dns != new_dns:
-            subject = {"baseline": old_dns, "current": new_dns}
-            findings.append(_finding("dns_changed", "medium", "DNS 配置已变化", "DNS 服务器与首次基线不同。", subject))
+            if old_dns and not new_dns:
+                pass
+            else:
+                subject = {"baseline": old_dns, "current": new_dns}
+                findings.append(_finding("dns_changed", "medium", "DNS 配置已变化", "DNS 服务器与首次基线不同。", subject))
 
     if "proxy" not in failed:
         old_proxy = _proxy_identity(baseline)
         new_proxy = _proxy_identity(current)
         if old_proxy != new_proxy:
-            subject = {"baseline": old_proxy, "current": new_proxy}
-            findings.append(_finding("proxy_changed", "medium", "系统代理已变化", "用户或 WinHTTP 代理与首次基线不同。", subject))
+            if _is_local_proxy_identity(old_proxy) and _is_empty_proxy_identity(new_proxy):
+                pass
+            else:
+                subject = {"baseline": old_proxy, "current": new_proxy}
+                findings.append(_finding("proxy_changed", "medium", "系统代理已变化", "用户或 WinHTTP 代理与首次基线不同。", subject))
 
     return findings
 
@@ -813,46 +837,55 @@ def _find_baseline_differences(baseline: dict[str, Any], current: dict[str, Any]
         old_gateway = _gateway_identity(baseline)
         new_gateway = _gateway_identity(current)
         if old_gateway != new_gateway:
-            subject = {"baseline": old_gateway, "current": new_gateway}
-            findings.append(
-                _finding(
-                    "gateway_changed",
-                    "high",
-                    "\u7f51\u5173 IP \u6216 MAC \u5df2\u53d8\u5316",
-                    "\u9ed8\u8ba4\u7f51\u5173\u8eab\u4efd\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
-                    subject,
+            if old_gateway and not new_gateway:
+                pass
+            else:
+                subject = {"baseline": old_gateway, "current": new_gateway}
+                findings.append(
+                    _finding(
+                        "gateway_changed",
+                        "high",
+                        "\u7f51\u5173 IP \u6216 MAC \u5df2\u53d8\u5316",
+                        "\u9ed8\u8ba4\u7f51\u5173\u8eab\u4efd\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
+                        subject,
+                    )
                 )
-            )
 
     if "dns" not in failed:
         old_dns = _dns_identity(baseline)
         new_dns = _dns_identity(current)
         if old_dns != new_dns:
-            subject = {"baseline": old_dns, "current": new_dns}
-            findings.append(
-                _finding(
-                    "dns_changed",
-                    "medium",
-                    "DNS \u914d\u7f6e\u5df2\u53d8\u5316",
-                    "DNS \u670d\u52a1\u5668\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
-                    subject,
+            if old_dns and not new_dns:
+                pass
+            else:
+                subject = {"baseline": old_dns, "current": new_dns}
+                findings.append(
+                    _finding(
+                        "dns_changed",
+                        "medium",
+                        "DNS \u914d\u7f6e\u5df2\u53d8\u5316",
+                        "DNS \u670d\u52a1\u5668\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
+                        subject,
+                    )
                 )
-            )
 
     if "proxy" not in failed:
         old_proxy = _proxy_identity(baseline)
         new_proxy = _proxy_identity(current)
         if old_proxy != new_proxy:
-            subject = {"baseline": old_proxy, "current": new_proxy}
-            findings.append(
-                _finding(
-                    "proxy_changed",
-                    "medium",
-                    "\u7cfb\u7edf\u4ee3\u7406\u5df2\u53d8\u5316",
-                    "\u7528\u6237\u6216 WinHTTP \u4ee3\u7406\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
-                    subject,
+            if _is_local_proxy_identity(old_proxy) and _is_empty_proxy_identity(new_proxy):
+                pass
+            else:
+                subject = {"baseline": old_proxy, "current": new_proxy}
+                findings.append(
+                    _finding(
+                        "proxy_changed",
+                        "medium",
+                        "\u7cfb\u7edf\u4ee3\u7406\u5df2\u53d8\u5316",
+                        "\u7528\u6237\u6216 WinHTTP \u4ee3\u7406\u4e0e\u9996\u6b21\u57fa\u7ebf\u4e0d\u540c\u3002",
+                        subject,
+                    )
                 )
-            )
 
     return findings
 
