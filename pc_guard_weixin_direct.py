@@ -44,6 +44,7 @@ DEFAULT_UNLOCK_CAMERA_ALERT = {
     "camera_index": 0,
     "cooldown_seconds": 300,
     "capture_delay_seconds": 1.5,
+    "relock_on_unlock": True,
 }
 
 
@@ -436,6 +437,7 @@ def format_unlock_camera_status(pc_config: dict) -> str:
         "\u89e3\u9501\u62cd\u7167\uff1a" + ("\u5df2\u5f00\u542f" if enabled else "\u5df2\u5173\u95ed"),
         f"\u5de5\u4f5c\u65e5\u514d\u6253\u6270\uff1a{start}-{end}",
         "\u5f53\u524d\u72b6\u6001\uff1a" + ("\u4f11\u7720\u65f6\u6bb5\uff0c\u4e0d\u62cd\u7167" if disabled_now else "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u89e3\u9501\u4f1a\u62cd\u7167\u9884\u8b66"),
+        "\u81ea\u52a8\u91cd\u65b0\u9501\u5c4f\uff1a" + ("\u5df2\u5f00\u542f" if config.get("relock_on_unlock", True) else "\u5df2\u5173\u95ed"),
         f"\u6444\u50cf\u5934\uff1a{config.get('camera_index', 0)}",
     ]
     return "\n".join(lines)
@@ -610,13 +612,26 @@ def maybe_send_unlock_camera_alert(
     if disabled_now or in_cooldown:
         return
 
+    relocked = False
+    if config.get("relock_on_unlock", True):
+        try:
+            relocked = lock_workstation()
+            monitor_state["relocked_at"] = iso_now()
+            monitor_state["relock_ok"] = relocked
+            write_json(state_path, monitor_state)
+        except Exception as exc:
+            monitor_state["relock_ok"] = False
+            monitor_state["relock_error"] = str(exc)
+            write_json(state_path, monitor_state)
+
     photo_dir = pc_config_path.parent / "unlock_photos"
     caption = "\n".join(
         [
             "\u3010PC Guard \u89e3\u9501\u9884\u8b66\u3011",
             "\u68c0\u6d4b\u5230\u7535\u8111\u4ece\u9501\u5c4f\u53d8\u4e3a\u5df2\u89e3\u9501\u3002",
             f"\u65f6\u95f4\uff1a{now.strftime('%Y-%m-%d %H:%M:%S')}",
-            "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u5df2\u5c1d\u8bd5\u4f7f\u7528\u524d\u7f6e\u6444\u50cf\u5934\u62cd\u7167\u3002",
+            "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u5df2\u7acb\u5373\u91cd\u65b0\u9501\u5c4f\u3002" if relocked else "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u91cd\u65b0\u9501\u5c4f\u672a\u786e\u8ba4\u6210\u529f\u3002",
+            "\u5df2\u5c1d\u8bd5\u5728\u9501\u5c4f\u72b6\u6001\u4e0b\u4f7f\u7528\u524d\u7f6e\u6444\u50cf\u5934\u62cd\u7167\u3002",
         ]
     )
     try:

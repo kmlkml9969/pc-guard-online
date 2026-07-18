@@ -225,6 +225,7 @@ $serverConfig = @{
     camera_index = 0
     cooldown_seconds = 300
     capture_delay_seconds = 1.5
+    relock_on_unlock = $true
   }
   notifications = @{
     ntfy_url = ""
