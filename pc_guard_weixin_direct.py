@@ -1,9 +1,11 @@
 import argparse
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import random
+import secrets
 import socket
 import subprocess
 import time
@@ -26,7 +28,9 @@ from pc_guard_security import (
 
 
 CHANNEL_VERSION = "1.0.3"
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 TEXT = 1
+IMAGE = 2
 BOT = 2
 FINISH = 2
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -50,6 +54,26 @@ def read_json(path: Path) -> dict:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def normalize_account_id_value(value: object) -> str:
+    if isinstance(value, dict):
+        for key in ("account", "Account", "id", "value", "Value"):
+            nested = value.get(key)
+            normalized = normalize_account_id_value(nested)
+            if normalized:
+                return normalized
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            normalized = normalize_account_id_value(item)
+            if normalized:
+                return normalized
+        return ""
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "null"}:
+        return ""
+    return text
 
 
 def stop_competing_openclaw_gateway() -> None:
@@ -77,10 +101,12 @@ Get-CimInstance Win32_Process -Filter "name = 'node.exe'" | Where-Object {
 
 def find_account(openclaw_dir: Path, account_id: str | None) -> tuple[str, dict]:
     accounts_path = openclaw_dir / "openclaw-weixin" / "accounts.json"
-    accounts = json.loads(accounts_path.read_text(encoding="utf-8-sig"))
-    if not accounts:
+    raw_accounts = json.loads(accounts_path.read_text(encoding="utf-8-sig"))
+    accounts = [normalize_account_id_value(item) for item in (raw_accounts if isinstance(raw_accounts, list) else [raw_accounts])]
+    accounts = [item for item in accounts if item]
+    selected = normalize_account_id_value(account_id) or (accounts[-1] if accounts else "")
+    if not selected:
         raise RuntimeError("No Weixin ClawBot account found")
-    selected = account_id or accounts[-1]
     account_path = openclaw_dir / "openclaw-weixin" / "accounts" / f"{selected}.json"
     return selected, read_json(account_path)
 
@@ -135,43 +161,110 @@ def send_message(base_url: str, token: str, to_user_id: str, text: str, context_
     )
 
 
-def send_media_with_openclaw(
-    account_id: str,
-    to_user_id: str,
-    text: str,
-    media_path: Path,
-    timeout: int = 45,
-) -> None:
-    openclaw_cmd = Path(os.environ.get("APPDATA", "")) / "npm" / "openclaw.cmd"
-    if not openclaw_cmd.exists():
-        raise RuntimeError(f"openclaw.cmd not found: {openclaw_cmd}")
-    completed = subprocess.run(
-        [
-            str(openclaw_cmd),
-            "message",
-            "send",
-            "--channel",
-            "openclaw-weixin",
-            "--account",
-            account_id,
-            "--target",
-            to_user_id,
-            "--message",
-            text,
-            "--media",
-            str(media_path),
-            "--json",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+def _aes_ecb_encrypt_pkcs7(data: bytes, key: bytes) -> bytes:
+    try:
+        from Crypto.Cipher import AES
+    except Exception as exc:
+        raise RuntimeError("pycryptodome is not installed; run: python -m pip install pycryptodome") from exc
+    pad_len = 16 - (len(data) % 16)
+    cipher = AES.new(key, AES.MODE_ECB)
+    return cipher.encrypt(data + bytes([pad_len]) * pad_len)
+
+
+def _cdn_upload(url: str, data: bytes, timeout: int = 30) -> str:
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/octet-stream")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        encrypted_param = resp.headers.get("x-encrypted-param") or ""
+        if resp.status != 200:
+            raise RuntimeError(f"CDN upload HTTP {resp.status}")
+        if not encrypted_param:
+            raise RuntimeError("CDN upload response missing x-encrypted-param")
+        return encrypted_param
+
+
+def upload_image_to_weixin(base_url: str, token: str, to_user_id: str, image_path: Path) -> dict:
+    raw = image_path.read_bytes()
+    rawsize = len(raw)
+    rawfilemd5 = hashlib.md5(raw).hexdigest()
+    filekey = secrets.token_hex(16)
+    aeskey = secrets.token_bytes(16)
+    ciphertext = _aes_ecb_encrypt_pkcs7(raw, aeskey)
+    upload = post_json(
+        base_url,
+        "ilink/bot/getuploadurl",
+        token,
+        {
+            "filekey": filekey,
+            "media_type": 1,
+            "to_user_id": to_user_id,
+            "rawsize": rawsize,
+            "rawfilemd5": rawfilemd5,
+            "filesize": len(ciphertext),
+            "no_need_thumb": True,
+            "aeskey": aeskey.hex(),
+            "base_info": {"channel_version": CHANNEL_VERSION},
+        },
+        timeout=20,
     )
-    if completed.returncode != 0:
-        stdout = completed.stdout.decode("utf-8", errors="replace")[-500:]
-        stderr = completed.stderr.decode("utf-8", errors="replace")[-500:]
-        raise RuntimeError(f"openclaw media send failed rc={completed.returncode} stdout={stdout} stderr={stderr}")
+    upload_param = upload.get("upload_param") or ""
+    if not upload_param:
+        raise RuntimeError(f"getuploadurl returned no upload_param: {upload}")
+    upload_url = (
+        CDN_BASE_URL
+        + "/upload?encrypted_query_param="
+        + urllib.parse.quote(str(upload_param), safe="")
+        + "&filekey="
+        + urllib.parse.quote(filekey, safe="")
+    )
+    encrypted_param = _cdn_upload(upload_url, ciphertext)
+    return {
+        "encrypt_query_param": encrypted_param,
+        "aes_key": base64.b64encode(aeskey).decode("ascii"),
+        "encrypt_type": 1,
+        "mid_size": len(ciphertext),
+    }
+
+
+def send_image_message(
+    base_url: str,
+    token: str,
+    to_user_id: str,
+    image_path: Path,
+    context_token: str | None = None,
+) -> None:
+    media = upload_image_to_weixin(base_url, token, to_user_id, image_path)
+    post_json(
+        base_url,
+        "ilink/bot/sendmessage",
+        token,
+        {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to_user_id,
+                "client_id": "pcguard-" + uuid.uuid4().hex,
+                "message_type": BOT,
+                "message_state": FINISH,
+                "item_list": [
+                    {
+                        "type": IMAGE,
+                        "image_item": {
+                            "media": {
+                                "encrypt_query_param": media["encrypt_query_param"],
+                                "aes_key": media["aes_key"],
+                                "encrypt_type": media["encrypt_type"],
+                            },
+                            "mid_size": media["mid_size"],
+                        },
+                    }
+                ],
+                "context_token": context_token or None,
+            },
+            "base_info": {"channel_version": CHANNEL_VERSION},
+        },
+        timeout=20,
+    )
 
 
 def pc_api(config: dict, path: str, method: str = "GET") -> dict:
@@ -533,13 +626,14 @@ def maybe_send_unlock_camera_alert(
             float(config.get("capture_delay_seconds", 1.5)),
         )
         try:
-            send_media_with_openclaw(account_id, allow_user, caption, photo_path)
+            send_message(base_url, token, allow_user, caption, None)
+            send_image_message(base_url, token, allow_user, photo_path)
         except Exception as exc:
             try:
                 send_message(base_url, token, allow_user, caption + f"\n\u7167\u7247\u5df2\u4fdd\u5b58\uff1a{photo_path}\n\u53d1\u9001\u7167\u7247\u5931\u8d25\uff1a{exc}", None)
             except Exception as notify_exc:
                 print(f"unlock text fallback send failed: {notify_exc}", flush=True)
-            print(f"unlock photo media send failed: {exc}", flush=True)
+            print(f"unlock photo direct send failed: {exc}", flush=True)
         monitor_state["last_alert_at"] = iso_now()
         monitor_state["last_photo_path"] = str(photo_path)
         write_json(state_path, monitor_state)

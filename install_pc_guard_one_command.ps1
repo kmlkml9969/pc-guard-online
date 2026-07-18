@@ -173,6 +173,7 @@ function Get-LatestWeixinAccount {
 
 Require-Command python "Install Python 3.11+ first, or add it to PATH."
 Ensure-PythonModule -ImportName "cv2" -PackageName "opencv-python"
+Ensure-PythonModule -ImportName "Crypto.Cipher.AES" -PackageName "pycryptodome"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 

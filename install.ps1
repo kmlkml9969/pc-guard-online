@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $BaseUrl = $env:PC_GUARD_BASE_URL
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-  $BaseUrl = "https://raw.githubusercontent.com/kmlkml9969/pc-guard-online/pcguard-20260718-1"
+  $BaseUrl = "https://raw.githubusercontent.com/kmlkml9969/pc-guard-online/pcguard-20260718-2"
 }
 
 $WithWeixin = $true
@@ -46,32 +46,11 @@ function Ensure-Command {
   }
 }
 
-function Ensure-OpenClaw {
-  $openclawCmd = Join-Path $env:APPDATA "npm\openclaw.cmd"
-  if (Test-Path -LiteralPath $openclawCmd) {
-    return
-  }
-  if ($SkipDependencyInstall) {
-    throw "openclaw.cmd not found. Install openclaw first or rerun without PC_GUARD_SKIP_DEPENDENCY_INSTALL."
-  }
-  Ensure-Command -Name "node" -WingetId "OpenJS.NodeJS.LTS"
-  Ensure-Command -Name "npm" -WingetId "OpenJS.NodeJS.LTS"
-  Write-Output "Installing dependency: openclaw"
-  npm install -g openclaw
-  Refresh-Path
-  if (-not (Test-Path -LiteralPath $openclawCmd)) {
-    throw "openclaw.cmd still not found after npm install -g openclaw. Restart PowerShell and rerun this command."
-  }
-}
-
 if ($BaseUrl -like "*YOUR_DOMAIN_OR_RAW_GITHUB_PATH*") {
   throw "Set -BaseUrl to the folder URL that hosts the PC Guard files."
 }
 
 Ensure-Command -Name "python" -WingetId "Python.Python.3.12"
-Ensure-Command -Name "node" -WingetId "OpenJS.NodeJS.LTS"
-Ensure-Command -Name "npm" -WingetId "OpenJS.NodeJS.LTS"
-Ensure-OpenClaw
 
 $base = $BaseUrl.TrimEnd("/")
 $work = Join-Path $env:TEMP ("pcguard-install-" + [Guid]::NewGuid().ToString("N"))
