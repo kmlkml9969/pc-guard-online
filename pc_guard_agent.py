@@ -150,6 +150,13 @@ def lock_workstation() -> bool:
     return bool(user32.LockWorkStation())
 
 
+def is_locked_like(desktop: str, foreground: str) -> bool:
+    foreground_lower = foreground.lower()
+    return desktop == "Winlogon" or foreground_lower == "logonui" or (
+        desktop != "Default" and foreground_lower == "lockapp"
+    )
+
+
 @LowLevelKeyboardProc
 def keyboard_proc(n_code, w_param, l_param):
     global win_key_down, last_win_l_at, last_win_l_monotonic
@@ -211,7 +218,7 @@ def collect_status(config: dict) -> dict:
             "last_win_l_at": last_hotkey,
             "seconds_since_last_win_l": seconds_since_hotkey,
         }
-    locked_like = desktop == "Winlogon" or foreground.lower() in ("lockapp", "logonui")
+    locked_like = is_locked_like(desktop, foreground)
     return {
         "pc_name": config["pc_name"],
         "agent_time": iso_now(),

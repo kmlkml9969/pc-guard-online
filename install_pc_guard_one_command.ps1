@@ -118,6 +118,28 @@ function Test-PCGuardApi {
   }
 }
 
+function Ensure-PythonModule {
+  param(
+    [string]$ImportName,
+    [string]$PackageName
+  )
+
+  python -c "import $ImportName" 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    return
+  }
+
+  Write-Output "Installing Python module: $PackageName"
+  python -m pip install --user $PackageName
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to install Python module: $PackageName"
+  }
+  python -c "import $ImportName"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Python module still unavailable after install: $ImportName"
+  }
+}
+
 function Get-LatestWeixinAccount {
   param(
     [string]$OpenClawDir,
@@ -150,6 +172,7 @@ function Get-LatestWeixinAccount {
 }
 
 Require-Command python "Install Python 3.11+ first, or add it to PATH."
+Ensure-PythonModule -ImportName "cv2" -PackageName "opencv-python"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
@@ -192,6 +215,15 @@ $serverConfig = @{
     time = "18:30"
     window_seconds = 300
     late_window_minutes = 330
+  }
+  unlock_camera_alert = @{
+    enabled = $true
+    disabled_weekdays_only = $true
+    disabled_start = "09:00"
+    disabled_end = "18:00"
+    camera_index = 0
+    cooldown_seconds = 300
+    capture_delay_seconds = 1.5
   }
   notifications = @{
     ntfy_url = ""

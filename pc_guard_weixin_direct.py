@@ -2,6 +2,7 @@ import argparse
 import base64
 import ctypes
 import json
+import os
 import random
 import socket
 import subprocess
@@ -31,6 +32,15 @@ FINISH = 2
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+DEFAULT_UNLOCK_CAMERA_ALERT = {
+    "enabled": True,
+    "disabled_weekdays_only": True,
+    "disabled_start": "09:00",
+    "disabled_end": "18:00",
+    "camera_index": 0,
+    "cooldown_seconds": 300,
+    "capture_delay_seconds": 1.5,
+}
 
 
 def read_json(path: Path) -> dict:
@@ -125,6 +135,45 @@ def send_message(base_url: str, token: str, to_user_id: str, text: str, context_
     )
 
 
+def send_media_with_openclaw(
+    account_id: str,
+    to_user_id: str,
+    text: str,
+    media_path: Path,
+    timeout: int = 45,
+) -> None:
+    openclaw_cmd = Path(os.environ.get("APPDATA", "")) / "npm" / "openclaw.cmd"
+    if not openclaw_cmd.exists():
+        raise RuntimeError(f"openclaw.cmd not found: {openclaw_cmd}")
+    completed = subprocess.run(
+        [
+            str(openclaw_cmd),
+            "message",
+            "send",
+            "--channel",
+            "openclaw-weixin",
+            "--account",
+            account_id,
+            "--target",
+            to_user_id,
+            "--message",
+            text,
+            "--media",
+            str(media_path),
+            "--json",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0:
+        stdout = completed.stdout.decode("utf-8", errors="replace")[-500:]
+        stderr = completed.stderr.decode("utf-8", errors="replace")[-500:]
+        raise RuntimeError(f"openclaw media send failed rc={completed.returncode} stdout={stdout} stderr={stderr}")
+
+
 def pc_api(config: dict, path: str, method: str = "GET") -> dict:
     base = f"http://{config.get('bind_host', '127.0.0.1')}:{int(config.get('bind_port', 8787))}"
     url = urllib.parse.urljoin(base, path)
@@ -201,6 +250,13 @@ def lock_workstation() -> bool:
     return bool(user32.LockWorkStation())
 
 
+def is_locked_like(desktop: str, foreground: str) -> bool:
+    foreground_lower = foreground.lower()
+    return desktop == "Winlogon" or foreground_lower == "logonui" or (
+        desktop != "Default" and foreground_lower == "lockapp"
+    )
+
+
 def parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -210,11 +266,93 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
+def _parse_clock(value: object, default: str) -> tuple[int, int]:
+    text = str(value or default)
+    try:
+        hour_text, minute_text = text.split(":", 1)
+        hour = max(0, min(23, int(hour_text)))
+        minute = max(0, min(59, int(minute_text)))
+        return hour, minute
+    except Exception:
+        hour_text, minute_text = default.split(":", 1)
+        return int(hour_text), int(minute_text)
+
+
+def unlock_camera_config(pc_config: dict) -> dict:
+    config = dict(DEFAULT_UNLOCK_CAMERA_ALERT)
+    user_config = pc_config.get("unlock_camera_alert")
+    if isinstance(user_config, dict):
+        config.update(user_config)
+    return config
+
+
+def unlock_camera_disabled_now(config: dict, now: datetime | None = None) -> bool:
+    now = now or datetime.now().astimezone()
+    if config.get("disabled_weekdays_only", True) and now.weekday() >= 5:
+        return False
+    start_h, start_m = _parse_clock(config.get("disabled_start"), "09:00")
+    end_h, end_m = _parse_clock(config.get("disabled_end"), "18:00")
+    current = now.hour * 60 + now.minute
+    start = start_h * 60 + start_m
+    end = end_h * 60 + end_m
+    if start <= end:
+        return start <= current < end
+    return current >= start or current < end
+
+
+def capture_webcam_photo(photo_dir: Path, camera_index: int = 0, delay_seconds: float = 1.5) -> Path:
+    try:
+        import cv2
+    except Exception as exc:
+        raise RuntimeError("opencv-python is not installed; run: python -m pip install opencv-python") from exc
+
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    path = photo_dir / f"unlock-{stamp}.jpg"
+    camera = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
+    if not camera.isOpened():
+        camera.release()
+        raise RuntimeError(f"camera {camera_index} could not be opened")
+    try:
+        deadline = time.monotonic() + max(0.5, float(delay_seconds))
+        frame = None
+        while time.monotonic() < deadline:
+            ok, candidate = camera.read()
+            if ok and candidate is not None:
+                frame = candidate
+            time.sleep(0.1)
+        if frame is None:
+            ok, frame = camera.read()
+        if frame is None:
+            raise RuntimeError("camera returned no frame")
+        ok = cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not ok or not path.exists():
+            raise RuntimeError("failed to save camera photo")
+        return path
+    finally:
+        camera.release()
+
+
+def format_unlock_camera_status(pc_config: dict) -> str:
+    config = unlock_camera_config(pc_config)
+    enabled = bool(config.get("enabled", True))
+    disabled_now = unlock_camera_disabled_now(config)
+    start = str(config.get("disabled_start", "09:00"))
+    end = str(config.get("disabled_end", "18:00"))
+    lines = [
+        "\u89e3\u9501\u62cd\u7167\uff1a" + ("\u5df2\u5f00\u542f" if enabled else "\u5df2\u5173\u95ed"),
+        f"\u5de5\u4f5c\u65e5\u514d\u6253\u6270\uff1a{start}-{end}",
+        "\u5f53\u524d\u72b6\u6001\uff1a" + ("\u4f11\u7720\u65f6\u6bb5\uff0c\u4e0d\u62cd\u7167" if disabled_now else "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u89e3\u9501\u4f1a\u62cd\u7167\u9884\u8b66"),
+        f"\u6444\u50cf\u5934\uff1a{config.get('camera_index', 0)}",
+    ]
+    return "\n".join(lines)
+
+
 def local_status_snapshot(pc_config_path: Path) -> dict:
     pc_config = read_json(pc_config_path)
     desktop = get_input_desktop_name()
     foreground = get_foreground_process_name()
-    locked_like = desktop == "Winlogon" or foreground.lower() in ("lockapp", "logonui")
+    locked_like = is_locked_like(desktop, foreground)
     state_path = pc_config_path.with_name("pc_guard_session_state.json")
     try:
         saved_state = read_json(state_path)
@@ -319,6 +457,8 @@ def handle_command(text: str, pc_config_path: Path, security: SecurityMonitor) -
         protection = apply_network_protection()
         scan = security.run_scan()
         return format_network_protection(protection, status=scan)
+    if trimmed in {"\u89e3\u9501\u62cd\u7167", "\u9632\u76d7\u72b6\u6001", "\u9632\u76d7"} or lower in {"/unlockphoto", "/theft"}:
+        return format_unlock_camera_status(read_json(pc_config_path))
     if trimmed == "\u5e2e\u52a9" or lower in {"/pchelp", "help"}:
         return (
             "\u5e38\u7528\u64cd\u4f5c\uff1a\n"
@@ -327,10 +467,90 @@ def handle_command(text: str, pc_config_path: Path, security: SecurityMonitor) -
             "\u7f51\u7edc - \u67e5\u770b\u5f53\u524d WiFi \u662f\u5426\u5b89\u5168\n"
             "\u98ce\u9669 - \u67e5\u770b\u6700\u8fd1\u53d1\u73b0\u7684\u95ee\u9898\n"
             "\u9632\u62a4 - \u52a0\u56fa\u7535\u8111\u4fa7\u7f51\u7edc\u66b4\u9732\n"
+            "\u9632\u76d7 - \u67e5\u770b\u89e3\u9501\u62cd\u7167\u72b6\u6001\n"
             "\u9501\u5c4f - \u7acb\u5373\u9501\u5b9a\u7535\u8111\n\n"
             "\u5e73\u65f6\u53ea\u9700\u8981\u53d1\u9001\u201c\u72b6\u6001\u201d\u6216\u201c\u5b89\u5168\u201d\u3002"
         )
     return None
+
+
+def maybe_send_unlock_camera_alert(
+    pc_config_path: Path,
+    base_url: str,
+    token: str,
+    account_id: str,
+    allow_user: str,
+) -> None:
+    pc_config = read_json(pc_config_path)
+    config = unlock_camera_config(pc_config)
+    if not config.get("enabled", True):
+        return
+    state_path = pc_config_path.with_name("unlock_camera_state.json")
+    try:
+        monitor_state = read_json(state_path)
+    except Exception:
+        monitor_state = {}
+
+    snapshot = local_status_snapshot(pc_config_path)
+    pc_state = snapshot.get("state") or {}
+    locked = bool(pc_state.get("locked_like"))
+    now = datetime.now().astimezone()
+    disabled_now = unlock_camera_disabled_now(config, now)
+    previous_locked = bool(monitor_state.get("previous_locked_like"))
+
+    if locked:
+        monitor_state.update({"previous_locked_like": True, "last_locked_at": iso_now(), "updated_at": iso_now()})
+        write_json(state_path, monitor_state)
+        return
+
+    if not previous_locked:
+        monitor_state.update({"previous_locked_like": False, "updated_at": iso_now()})
+        write_json(state_path, monitor_state)
+        return
+
+    last_alert = parse_iso(monitor_state.get("last_alert_at"))
+    cooldown = max(60, int(config.get("cooldown_seconds", 300)))
+    in_cooldown = bool(last_alert and (now - last_alert.astimezone()).total_seconds() < cooldown)
+    monitor_state.update({"previous_locked_like": False, "last_unlocked_at": iso_now(), "updated_at": iso_now()})
+    write_json(state_path, monitor_state)
+
+    if disabled_now or in_cooldown:
+        return
+
+    photo_dir = pc_config_path.parent / "unlock_photos"
+    caption = "\n".join(
+        [
+            "\u3010PC Guard \u89e3\u9501\u9884\u8b66\u3011",
+            "\u68c0\u6d4b\u5230\u7535\u8111\u4ece\u9501\u5c4f\u53d8\u4e3a\u5df2\u89e3\u9501\u3002",
+            f"\u65f6\u95f4\uff1a{now.strftime('%Y-%m-%d %H:%M:%S')}",
+            "\u975e\u5de5\u4f5c\u65f6\u6bb5\uff0c\u5df2\u5c1d\u8bd5\u4f7f\u7528\u524d\u7f6e\u6444\u50cf\u5934\u62cd\u7167\u3002",
+        ]
+    )
+    try:
+        photo_path = capture_webcam_photo(
+            photo_dir,
+            int(config.get("camera_index", 0)),
+            float(config.get("capture_delay_seconds", 1.5)),
+        )
+        try:
+            send_media_with_openclaw(account_id, allow_user, caption, photo_path)
+        except Exception as exc:
+            try:
+                send_message(base_url, token, allow_user, caption + f"\n\u7167\u7247\u5df2\u4fdd\u5b58\uff1a{photo_path}\n\u53d1\u9001\u7167\u7247\u5931\u8d25\uff1a{exc}", None)
+            except Exception as notify_exc:
+                print(f"unlock text fallback send failed: {notify_exc}", flush=True)
+            print(f"unlock photo media send failed: {exc}", flush=True)
+        monitor_state["last_alert_at"] = iso_now()
+        monitor_state["last_photo_path"] = str(photo_path)
+        write_json(state_path, monitor_state)
+    except Exception as exc:
+        try:
+            send_message(base_url, token, allow_user, caption + f"\n\u62cd\u7167\u5931\u8d25\uff1a{exc}", None)
+        except Exception as notify_exc:
+            print(f"unlock capture failure notification failed: {notify_exc}", flush=True)
+        monitor_state["last_alert_at"] = iso_now()
+        monitor_state["last_error"] = str(exc)
+        write_json(state_path, monitor_state)
 
 
 def safe_handle_command(text: str, pc_config_path: Path, security: SecurityMonitor) -> str | None:
@@ -446,6 +666,7 @@ def main() -> None:
                 security.run_scan()
                 last_security_scan = now_mono
             flush_security_alerts(security, base_url, token, allow_user)
+            maybe_send_unlock_camera_alert(pc_config_path, base_url, token, account_id, allow_user)
             maybe_send_reminder(base_url, token, allow_user, pc_config_path, reminder_state_path)
             resp = get_updates(base_url, token, sync.get("get_updates_buf") or "")
             ret = resp.get("ret")
